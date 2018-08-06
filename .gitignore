@@ -1,3 +1,5 @@
 .idea/
 target/
 greekzipcodes.txt
+*.ser
+*.png

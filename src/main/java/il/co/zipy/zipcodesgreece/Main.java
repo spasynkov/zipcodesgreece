@@ -1,9 +1,6 @@
 package il.co.zipy.zipcodesgreece;
 
-import org.openqa.selenium.By;
-import org.openqa.selenium.JavascriptExecutor;
-import org.openqa.selenium.WebDriver;
-import org.openqa.selenium.WebElement;
+import org.openqa.selenium.*;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
@@ -19,25 +16,18 @@ public class Main implements Serializable {
 
 	private static final String CITIES_URLS = "citiesUrls.ser";
 	private static final String ADDRESSES = "address.ser";
+	private transient long screenshotsCounter;
+	private transient boolean areAllCitiesFound = false;
 
 	public Main() throws FileNotFoundException {
 		String chromeDriverPath = "resources/chromedriver.exe";
-		File file = getResourceFile(chromeDriverPath);
+		File file = Utils.getResourceFile(chromeDriverPath);
+		screenshotsCounter = Utils.initScreenShootsCounter();
 
 		System.setProperty("webdriver.chrome.driver", file.getAbsolutePath());
 
 		driver = new ChromeDriver();
 		wait = new WebDriverWait(driver, 20);
-	}
-
-	private File getResourceFile(String path) throws FileNotFoundException {
-		File result = new File(path);
-		if (result.exists() && result.isFile()) return result;
-
-		result = new File("src/main/" + path);
-		if (result.exists() && result.isFile()) return result;
-
-		throw new FileNotFoundException("ChromeDriver file is not found: " + path);
 	}
 
 	public static void main(String[] args) throws FileNotFoundException {
@@ -50,29 +40,35 @@ public class Main implements Serializable {
 		List<String> citiesUrl = null;
 		File file = new File(CITIES_URLS);
 		if (file.exists() && file.isFile()) {
-			citiesUrl = deserialize(file.getAbsolutePath());
+			citiesUrl = Utils.deserialize(file.getAbsolutePath());
 			System.out.println("Loaded " + citiesUrl.size() + " cities urls from file " + CITIES_URLS);
 		}
 
 		if (citiesUrl == null || citiesUrl.isEmpty()) {
-			citiesUrl = collectCities();
+			citiesUrl = new LinkedList<>();
+			do {
+				collectCities(citiesUrl);
+			} while (!areAllCitiesFound);
 		}
 
 		Collections.shuffle(citiesUrl);
 
 		boolean isFinished = false;
-		try {
-			collectZipCodes(citiesUrl, pageUrlWithZipCodes);
-			isFinished = true;
-		} catch (Exception e) {
-			e.printStackTrace();
-			System.out.println("Saving " + pageUrlWithZipCodes.size() + " entries");
-			serialize(pageUrlWithZipCodes, ADDRESSES);  // saving data to avoid getting it later
-		}
+		do {
+			try {
+				collectZipCodes(citiesUrl, pageUrlWithZipCodes);
+				isFinished = true;
+			} catch (Exception e) {
+				e.printStackTrace();
+				System.out.println("Saving " + pageUrlWithZipCodes.size() + " entries");
+				Utils.serialize(pageUrlWithZipCodes, ADDRESSES);  // saving data to avoid getting it later
+				doRandomWait(1000);
+				Utils.saveScreenshoot(driver, screenshotsCounter++);
+				Utils.saveLastUrl(driver.getCurrentUrl());
+			}
+		} while (!isFinished);
 
 		driver.quit();
-
-		if (!isFinished) return;
 
 		// saving data
 		final List<ZipCodeDataHolder> result = new LinkedList<>();
@@ -80,12 +76,17 @@ public class Main implements Serializable {
 			result.addAll(v);
 		});
 
-		try (FileWriter fw = new FileWriter("greekzipcodes.txt", true)) {
+		File resultFile = new File("greekzipcodes.txt");
+		try (FileWriter fw = new FileWriter(resultFile, true)) {
+			if (!file.exists() || (file.isFile() && file.length() == 0)) {
+				fw.write("Prefecture;City;Street-Number;Postal Code" + System.lineSeparator());
+			}
 			result.forEach(c -> {
 				try {
-					fw.write(c.toString());
+					fw.write(c.toString() + System.lineSeparator());
 				} catch (IOException e) {
 					System.err.print("Unable to write zipcode: " + c);
+					e.printStackTrace();
 				}
 			});
 		} catch (IOException e1) {
@@ -94,11 +95,14 @@ public class Main implements Serializable {
 	}
 
 	private void collectZipCodes(List<String> citiesUrl, Map<String, Set<ZipCodeDataHolder>> result) {
+		String lastUrl = Utils.getLastUrl();
+		if (lastUrl != null) citiesUrl.add(lastUrl);
+
 		// loading previous data
 		if (result.isEmpty()) {
 			File file = new File(ADDRESSES);
 			if (file.exists() && file.isFile()) {
-				Map<String, Set<ZipCodeDataHolder>> previousData = deserialize(file.getAbsolutePath());
+				Map<String, Set<ZipCodeDataHolder>> previousData = Utils.deserialize(file.getAbsolutePath());
 				if (previousData != null) {
 					String key;
 					Set<ZipCodeDataHolder> value;
@@ -115,44 +119,24 @@ public class Main implements Serializable {
 
 		// collecting new data
 		for (String cityUrl : citiesUrl) {
-			driver.get(cityUrl);
-			Set<ZipCodeDataHolder> dataFromTable = parsePage();
-			result.put(cityUrl, dataFromTable);
+			if (!result.containsKey(cityUrl)) {
+				driver.get(cityUrl);
+				Set<ZipCodeDataHolder> dataFromTable = parsePage();
+				result.put(cityUrl, dataFromTable);
+			}
 		}
 
 		// saving
-		serialize(result, ADDRESSES);
+		Utils.serialize(result, ADDRESSES);
 	}
 
-	private <T> void serialize(T object, String filename) {
-		try {
-			FileOutputStream fout = new FileOutputStream(filename);
-			ObjectOutputStream oos = new ObjectOutputStream(fout);
-			oos.writeObject(object);
-		} catch (Exception e) {
-			System.err.println("Error while serialising object");
-			e.printStackTrace();
-		}
-	}
 
-	private <T> T deserialize(String filename) {
-		try {
-			FileInputStream fileInputStream = new FileInputStream(filename);
-			ObjectInputStream objectInputStream = new ObjectInputStream(fileInputStream);
-			Object o = objectInputStream.readObject();
-			return (T) o;
-		} catch (Exception e) {
-			System.err.println("Failed to read object");
-		}
-		return null;
-	}
 
-	private List<String> collectCities() {
+	private void collectCities(List<String> citiesUrl) {
 		// collecting data
-		List<String> perfecturesUrls = getLinksInDivByClassName("https://www.xo.gr/dir-tk/?lang=en", "perfecturesearches");
+		List<String> perfecturesUrls = getLinksInDivByClassName("https://www.xo.gr/dir-tk/", "perfecturesearches");
 		Collections.shuffle(perfecturesUrls);
 		closeCookiesInfoMessage();
-		List<String> citiesUrl = new LinkedList<>();
 		for (String perfectureUrl : perfecturesUrls) {
 			Set<String> citiesPagesUrls = collectCitiesPages(perfectureUrl);
 			for (String cityPage : citiesPagesUrls) {
@@ -164,8 +148,8 @@ public class Main implements Serializable {
 
 		System.out.println("Collected " + citiesUrl.size() + " cities url");
 
-		serialize(citiesUrl, CITIES_URLS);
-		return citiesUrl;
+		Utils.serialize(citiesUrl, CITIES_URLS);
+		areAllCitiesFound = true;
 	}
 
 	private Set<String> collectCitiesPages(String perfectureUrl) {
@@ -215,7 +199,7 @@ public class Main implements Serializable {
 		wait.until(input -> ((JavascriptExecutor) input).executeScript("return document.readyState").equals("complete"));
 		if (driver.getPageSource().contains("Are you a robot!")) {
 			System.err.println("Robot alert occurs. Data could be doubled probably");
-			doRandomWait(2000);
+			doRandomWait(200);
 			driver.navigate().refresh();
 		}
 	}
@@ -242,8 +226,8 @@ public class Main implements Serializable {
 
 
 	private void doRandomWait(long basicLatencyMillis) {
-		int fromInSeconds = 3;
-		int toInSeconds = 10;
+		int fromInSeconds = 1;
+		int toInSeconds = 3;
 
 		long wait = (int) (fromInSeconds * 1000 + Math.random() * ((toInSeconds - fromInSeconds) * 1000)) + basicLatencyMillis;
 		try {
